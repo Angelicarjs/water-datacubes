@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  water-analysis:
+    build: .
+    container_name: water-analysis-framework
+    volumes:
+      # Mount current directory for data persistence
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    ports:
+      # Optional: Expose Jupyter if needed
+      - "8888:8888"
+    working_dir: /app
+    command: python test.py
+    restart: unless-stopped
+    
+  # Optional: Jupyter service for interactive analysis
+  jupyter:
+    build: .
+    container_name: water-analysis-jupyter
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./logs:/app/logs
+      - ./notebooks:/app/notebooks
+    environment:
+      - PYTHONPATH=/app
+      - JUPYTER_ENABLE_LAB=yes
+    ports:
+      - "8888:8888"
+    working_dir: /app
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
+    profiles:
+      - jupyter

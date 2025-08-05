@@ -1,0 +1,145 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Generated data files
+*.nc
+*.h5
+*.pkl
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+
+# Analysis outputs
+ndwi_images/
+images/
+water_pixels_by_year.png
+cloud_water_correlation.png
+cloud_masking_analysis.png
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Large data files (if any)
+data/
+datasets/
+raw_data/
+
+# Configuration files with sensitive data
+config.ini
+secrets.json
+.env.local
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Generated outputs (keep structure but ignore content)
+outputs/*
+!outputs/.gitkeep
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+notebooks/*
+!notebooks/.gitkeep

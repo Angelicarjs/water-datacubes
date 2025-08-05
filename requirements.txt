@@ -1,0 +1,41 @@
+# Water Analysis Framework Requirements
+# Core scientific computing
+numpy>=1.20.0
+pandas>=1.2.0
+scipy>=1.7.0
+xarray>=0.19.0
+
+# Visualization
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Machine learning and statistics
+scikit-learn>=1.0.0
+
+# Geospatial and satellite data
+netCDF4>=1.5.0
+h5netcdf>=0.8.0
+
+# Progress tracking
+tqdm>=4.60.0
+
+# Logging and utilities
+python-dateutil>=2.7.0
+
+# Interactive development
+jupyter>=1.0.0
+jupyterlab>=3.0.0
+ipykernel>=6.0.0
+
+# Optional: Interactive maps
+folium>=0.12.0
+
+# Optional: Geometry operations
+shapely>=1.7.0
+
+# Optional: Dask for parallel processing
+dask>=2021.0.0
+distributed>=2021.0.0
+
+# Additional utilities
+requests>=2.25.0 
