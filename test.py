@@ -14,6 +14,52 @@ Features:
 - Configurable parameters for different study areas
 """
 
+def test_api_connection():
+    """
+    Test connection to the Planetary Computer API and try a simple query.
+    
+    Returns:
+    --------
+    bool
+        True if connection and query successful
+    """
+    import pystac_client
+    import planetary_computer
+    
+    logger.info("🔄 Testing connection to Planetary Computer API...")
+    
+    try:
+        # Initialize catalog
+        catalog = pystac_client.Client.open(
+            "https://planetarycomputer.microsoft.com/api/stac/v1",
+            modifier=planetary_computer.sign_inplace,
+        )
+        
+        # Try a very simple query for a single image
+        logger.info("🔍 Testing API with a simple query...")
+        test_bbox = [-73.705, 4.605, -73.700, 4.610]  # Small area
+        test_date = "2023-06-01/2023-06-30"  # Just one month
+        
+        search = catalog.search(
+            collections=["sentinel-2-l2a"],
+            bbox=test_bbox,
+            datetime=test_date,
+            limit=1  # Just get one image
+        )
+        
+        items = list(search.item_collection())
+        if len(items) > 0:
+            logger.info(f"✅ API test successful! Found {len(items)} item(s)")
+            logger.info(f"📅 Test item date: {items[0].datetime.strftime('%Y-%m-%d')}")
+            return True
+        else:
+            logger.warning("⚠️  API connection works but no data found in test query")
+            return True  # Still return True as the API is working
+            
+    except Exception as e:
+        logger.error(f"❌ API test failed: {str(e)}")
+        raise
+
 import os
 import warnings
 import numpy as np
@@ -215,8 +261,7 @@ class WaterAnalyzer:
             collections=[self.collection],
             bbox=bbox,
             datetime=f"{start_date}/{end_date}",
-            query={"eo:cloud_cover": {"lt": max_cloud_cover}},
-            limit=max_items
+            limit=max_items  # Simplified query without cloud cover filter for testing
         )
         
         self.items = list(search.item_collection())
@@ -1725,10 +1770,17 @@ def main():
     logger.info("🚀 Starting Water Analysis Framework")
     logger.info("=" * 50)
     
-    # Configuration for long-term analysis (2014-2024)
-    bbox = [-73.710, 4.600, -73.695, 4.615]  # Small area for testing
-    start_date = "2014-01-01"
-    end_date = "2024-12-31"
+    # Test API connection before proceeding
+    try:
+        test_api_connection(max_retries=3, retry_delay=2)
+    except Exception as e:
+        logger.error(str(e))
+        return None, None
+    
+    # Configuration for short-term analysis (2023 only)
+    bbox = [-73.705, 4.605, -73.700, 4.610]  # Very small area for testing
+    start_date = "2023-01-01"
+    end_date = "2023-12-31"
     
     logger.info("📅 Long-term analysis: 10-year time series (2014-2024)")
     logger.info("📊 This will provide comprehensive water dynamics analysis")

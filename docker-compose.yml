@@ -6,6 +6,7 @@ services:
     container_name: water-analysis-framework
     volumes:
       # Mount current directory for data persistence
+      - .:/app
       - ./data:/app/data
       - ./outputs:/app/outputs
       - ./logs:/app/logs
