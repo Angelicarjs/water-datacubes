@@ -8,57 +8,11 @@ using Sentinel-2 data from Microsoft Planetary Computer.
 
 Features:
 - Data retrieval from Planetary Computer
-- Water index calculation (NDWI, MNDWI)
+- Water index calculation (NDWI)
 - Temporal analysis of water extent
 - Visualization and statistics
 - Configurable parameters for different study areas
 """
-
-def test_api_connection():
-    """
-    Test connection to the Planetary Computer API and try a simple query.
-    
-    Returns:
-    --------
-    bool
-        True if connection and query successful
-    """
-    import pystac_client
-    import planetary_computer
-    
-    logger.info("🔄 Testing connection to Planetary Computer API...")
-    
-    try:
-        # Initialize catalog
-        catalog = pystac_client.Client.open(
-            "https://planetarycomputer.microsoft.com/api/stac/v1",
-            modifier=planetary_computer.sign_inplace,
-        )
-        
-        # Try a very simple query for a single image
-        logger.info("🔍 Testing API with a simple query...")
-        test_bbox = [-73.705, 4.605, -73.700, 4.610]  # Small area
-        test_date = "2023-06-01/2023-06-30"  # Just one month
-        
-        search = catalog.search(
-            collections=["sentinel-2-l2a"],
-            bbox=test_bbox,
-            datetime=test_date,
-            limit=1  # Just get one image
-        )
-        
-        items = list(search.item_collection())
-        if len(items) > 0:
-            logger.info(f"✅ API test successful! Found {len(items)} item(s)")
-            logger.info(f"📅 Test item date: {items[0].datetime.strftime('%Y-%m-%d')}")
-            return True
-        else:
-            logger.warning("⚠️  API connection works but no data found in test query")
-            return True  # Still return True as the API is working
-            
-    except Exception as e:
-        logger.error(f"❌ API test failed: {str(e)}")
-        raise
 
 import os
 import warnings
@@ -68,13 +22,12 @@ import matplotlib.pyplot as plt
 import xarray as xr
 import geopandas as gpd
 import shapely.geometry
-from datetime import datetime, timedelta
-from typing import List, Tuple, Optional, Dict, Any
+from datetime import datetime
+from typing import List, Optional, Dict, Any
 import logging
 import dask
-from dask.distributed import Client, LocalCluster, progress
+from dask.distributed import progress
 import multiprocessing
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from tqdm import tqdm
 
@@ -86,9 +39,7 @@ import rioxarray
 from rasterio.features import geometry_mask
 
 # Visualization
-import contextily
 import folium
-import hvplot.xarray
 
 # Configure logging
 logging.basicConfig(
@@ -160,6 +111,7 @@ class WaterAnalyzer:
     def __init__(self, 
                  collection: str = "sentinel-2-l2a",
                  assets: List[str] = None,
+                 band_aliases: Dict[str, str] = None,
                  chunksize: int = 2048,
                  resolution: int = 100,
                  epsg: int = 32618,
@@ -182,7 +134,8 @@ class WaterAnalyzer:
             EPSG code for projection
         """
         self.collection = collection
-        self.assets = assets or ["B03", "B08", "B11"]  # Green, NIR, SWIR
+        self.assets = assets or ["B03", "B08"]  # Green, NIR
+        self.band_aliases = band_aliases or {"green": "B03", "nir": "B08"}
         self.chunksize = chunksize
         self.resolution = resolution
         self.epsg = epsg
@@ -198,7 +151,6 @@ class WaterAnalyzer:
         # Data storage
         self.data = None
         self.ndwi = None
-        self.mndwi = None
         self.items = None
         self.dask_client = None
         
@@ -261,7 +213,8 @@ class WaterAnalyzer:
             collections=[self.collection],
             bbox=bbox,
             datetime=f"{start_date}/{end_date}",
-            limit=max_items  # Simplified query without cloud cover filter for testing
+            query={"eo:cloud_cover": {"lt": max_cloud_cover}},
+            limit=max_items
         )
         
         self.items = list(search.item_collection())
@@ -316,6 +269,7 @@ class WaterAnalyzer:
             'assets': self.assets,
             'chunksize': optimal_chunksize,
             'resolution': self.resolution,
+            'properties': True,  # Include properties for band names
         }
         
         # Only add epsg if specified
@@ -325,7 +279,6 @@ class WaterAnalyzer:
         self.data = (
             stackstac.stack(**stack_params)
             .where(lambda x: x > 0, other=np.nan)  # Sentinel-2 uses 0 as nodata
-            .assign_coords(band=lambda x: x.common_name.rename("band"))
             .chunk({
                 'time': 1,  # Process one time step at a time
                 'band': -1,  # Keep all bands together
@@ -351,7 +304,7 @@ class WaterAnalyzer:
     
     def calculate_water_indices(self, show_progress: bool = True) -> Dict[str, xr.DataArray]:
         """
-        Calculate water indices (NDWI and MNDWI) with detailed progress tracking.
+        Calculate water indices (NDWI) with detailed progress tracking.
         
         Parameters:
         -----------
@@ -360,86 +313,70 @@ class WaterAnalyzer:
             
         Returns:
         --------
-        Dictionary containing NDWI and MNDWI arrays
+        Dictionary containing NDWI array
         """
         if self.data is None:
             raise ValueError("No data loaded. Run load_data() first.")
         
         logger.info("🌊 Calculating water indices...")
-        logger.info("📐 Using bands: Green (B03), NIR (B08), SWIR (B11)")
+        logger.info("📐 Using bands: Green (B03), NIR (B08)")
         
         # Calculate water indices with detailed progress tracking
         start_time = time.time()
         
         if show_progress:
-            logger.info("📊 Step 1/6: Extracting individual bands...")
+            logger.info("📊 Step 1/5: Extracting individual bands...")
         
         # Get bands with progress tracking
         green = self.data.sel(band="green")
         nir = self.data.sel(band="nir")
-        swir = self.data.sel(band="swir16")
         
         if show_progress:
-            logger.info(f"✅ Step 1/6 completed: Band shapes - Green: {green.shape}, NIR: {nir.shape}, SWIR: {swir.shape}")
-            logger.info("📊 Step 2/6: Creating NDWI calculation graph...")
+            logger.info(f"✅ Step 1/5 completed: Band shapes - Green: {green.shape}, NIR: {nir.shape}")
+            logger.info("📊 Step 2/5: Creating NDWI calculation graph...")
         
         # Calculate NDWI with step-by-step progress
         logger.info("🧮 Calculating NDWI: (Green - NIR) / (Green + NIR)")
         
         if show_progress:
-            logger.info("📊 Step 3/6: Computing Green - NIR...")
+            logger.info("📊 Step 3/5: Computing Green - NIR...")
             green_minus_nir = green - nir
-            logger.info("✅ Step 3/6 completed: Green - NIR")
+            logger.info("✅ Step 3/5 completed: Green - NIR")
             
-            logger.info("📊 Step 4/6: Computing Green + NIR...")
+            logger.info("📊 Step 4/5: Computing Green + NIR...")
             green_plus_nir = green + nir
-            logger.info("✅ Step 4/6 completed: Green + NIR")
+            logger.info("✅ Step 4/5 completed: Green + NIR")
             
-            logger.info("📊 Step 5/6: Computing NDWI division...")
+            logger.info("📊 Step 5/5: Computing NDWI division...")
             self.ndwi = green_minus_nir / green_plus_nir
-            logger.info("✅ Step 5/6 completed: NDWI calculation")
+            logger.info("✅ Step 5/5 completed: NDWI calculation")
         else:
             # Direct calculation without progress tracking
             self.ndwi = (green - nir) / (green + nir)
-        
-        # Calculate MNDWI
-        logger.info("🧮 Calculating MNDWI: (Green - SWIR) / (Green + SWIR)")
-        self.mndwi = (green - swir) / (green + swir)
         
         # Compute indices with progress tracking
         if self.enable_parallel and self.dask_client is not None:
             logger.info("🚀 Computing water indices in parallel with progress tracking...")
             
             if show_progress:
-                logger.info("📊 Step 6/6: Computing NDWI with parallel processing...")
+                logger.info("📊 Computing NDWI with parallel processing...")
                 # Use Dask's progress function for detailed progress tracking
                 with progress(self.ndwi) as pbar:
                     self.ndwi = self.ndwi.compute()
                 logger.info("✅ NDWI computation completed!")
-                
-                logger.info("📊 Computing MNDWI with parallel processing...")
-                with progress(self.mndwi) as pbar:
-                    self.mndwi = self.mndwi.compute()
-                logger.info("✅ MNDWI computation completed!")
             else:
                 # Simple computation without progress bars
                 self.ndwi = self.ndwi.compute()
-                self.mndwi = self.mndwi.compute()
                 
         else:
             logger.info("🔄 Computing water indices sequentially...")
             
             if show_progress:
-                logger.info("📊 Step 6/6: Computing NDWI sequentially...")
+                logger.info("📊 Computing NDWI sequentially...")
                 self.ndwi = self.ndwi.compute()
                 logger.info("✅ NDWI computation completed!")
-                
-                logger.info("📊 Computing MNDWI sequentially...")
-                self.mndwi = self.mndwi.compute()
-                logger.info("✅ MNDWI computation completed!")
             else:
                 self.ndwi = self.ndwi.compute()
-                self.mndwi = self.mndwi.compute()
         
         indices_time = time.time() - start_time
         logger.info(f"⚡ Water indices calculation completed in {indices_time:.2f} seconds")
@@ -448,12 +385,10 @@ class WaterAnalyzer:
         logger.info("📊 Water indices statistics:")
         logger.info(f"   NDWI range: {float(self.ndwi.min()):.3f} to {float(self.ndwi.max()):.3f}")
         logger.info(f"   NDWI mean: {float(self.ndwi.mean()):.3f}")
-        logger.info(f"   MNDWI range: {float(self.mndwi.min()):.3f} to {float(self.mndwi.max()):.3f}")
-        logger.info(f"   MNDWI mean: {float(self.mndwi.mean()):.3f}")
         
         logger.info("✅ Water indices calculated successfully")
         
-        result = {"ndwi": self.ndwi, "mndwi": self.mndwi}
+        result = {"ndwi": self.ndwi}
         return result
     
     def get_computation_status(self) -> Dict[str, Any]:
@@ -521,34 +456,46 @@ class WaterAnalyzer:
             logger.info("📊 Step 1/5: Extracting Green band (B03)...")
         
         # Extract bands
-        green = self.data.sel(band="green")
-        nir = self.data.sel(band="nir")
+        green = self.data.sel(band="B03")
+        nir = self.data.sel(band="B08")
+        scl = self.data.sel(band="SCL")
         
         if show_progress:
-            logger.info(f"✅ Step 1/5 completed: Green band shape {green.shape}")
-            logger.info("📊 Step 2/5: Extracting NIR band (B08)...")
-            logger.info(f"✅ Step 2/5 completed: NIR band shape {nir.shape}")
-            logger.info("📊 Step 3/5: Computing Green - NIR...")
+            logger.info(f"✅ Step 1/6 completed: Green band shape {green.shape}")
+            logger.info("📊 Step 2/6: Extracting NIR band (B08)...")
+            logger.info(f"✅ Step 2/6 completed: NIR band shape {nir.shape}")
+            logger.info("📊 Step 3/6: Creating cloud mask...")
+        
+        # Create cloud mask (SCL values: 1=saturated, 2=dark, 3=shadow, 8,9=cloud, 10=cirrus)
+        valid_mask = ~((scl == 1) | (scl == 2) | (scl == 3) | (scl == 8) | (scl == 9) | (scl == 10))
+        
+        # Apply mask to bands
+        green = green.where(valid_mask)
+        nir = nir.where(valid_mask)
+        
+        if show_progress:
+            logger.info(f"✅ Step 3/6 completed: Cloud mask applied")
+            logger.info("📊 Step 4/6: Computing Green - NIR...")
         
         # Calculate numerator: Green - NIR
         green_minus_nir = green - nir
         
         if show_progress:
-            logger.info("✅ Step 3/5 completed: Green - NIR")
-            logger.info("📊 Step 4/5: Computing Green + NIR...")
+            logger.info("✅ Step 4/6 completed: Green - NIR")
+            logger.info("📊 Step 5/6: Computing Green + NIR...")
         
         # Calculate denominator: Green + NIR
         green_plus_nir = green + nir
         
         if show_progress:
-            logger.info("✅ Step 4/5 completed: Green + NIR")
-            logger.info("📊 Step 5/5: Computing NDWI division...")
+            logger.info("✅ Step 5/6 completed: Green + NIR")
+            logger.info("📊 Step 6/6: Computing NDWI division...")
         
         # Calculate NDWI
         self.ndwi = green_minus_nir / green_plus_nir
         
         if show_progress:
-            logger.info("✅ Step 5/5 completed: NDWI calculation")
+            logger.info("✅ Step 6/6 completed: NDWI calculation")
             logger.info("📊 Computing NDWI with parallel processing...")
         
         # Compute the result
@@ -585,12 +532,12 @@ class WaterAnalyzer:
         calculation_time = time.time() - start_time
         logger.info(f"⚡ NDWI calculation completed in {calculation_time:.2f} seconds")
         
-        # Count water pixels (NDWI > 0.3 is typically water)
-        water_pixels = (self.ndwi > 0.3).sum()
+        # Count water pixels (NDWI > 0.05 is typically water)
+        water_pixels = (self.ndwi > 0.05).sum()
         total_pixels = self.ndwi.size
         water_percentage = (water_pixels / total_pixels) * 100
         
-        logger.info(f"💧 Water pixels (NDWI > 0.3): {water_pixels:,} ({water_percentage:.2f}%)")
+        logger.info(f"💧 Water pixels (NDWI > 0.05): {water_pixels:,} ({water_percentage:.2f}%)")
         
         return self.ndwi
     
@@ -642,11 +589,11 @@ class WaterAnalyzer:
         logger.info("✅ NDWI calculation completed with visual progress!")
         
         # Count water pixels
-        water_pixels = (self.ndwi > 0.3).sum()
+        water_pixels = (self.ndwi > 0.05).sum()
         total_pixels = self.ndwi.size
         water_percentage = (water_pixels / total_pixels) * 100
         
-        logger.info(f"💧 Water pixels (NDWI > 0.3): {water_pixels:,} ({water_percentage:.2f}%)")
+        logger.info(f"💧 Water pixels (NDWI > 0.05): {water_pixels:,} ({water_percentage:.2f}%)")
         
         return self.ndwi
     
@@ -696,10 +643,10 @@ class WaterAnalyzer:
             
             # Water mask plot
             plt.subplot(1, 2, 2)
-            water_mask = ndwi_array > 0.3
+            water_mask = ndwi_array > 0.05
             im2 = plt.imshow(water_mask, cmap='Blues')
             plt.colorbar(im2, label='Water (1) / Non-water (0)')
-            plt.title('Water Mask (NDWI > 0.3)')
+            plt.title('Water Mask (NDWI > 0.05)')
             plt.axis('off')
             
             plt.tight_layout()
@@ -707,7 +654,7 @@ class WaterAnalyzer:
             plt.close()
             
             # Count water pixels for this time step
-            water_pixels = (ndwi_array > 0.3).sum()
+            water_pixels = (ndwi_array > 0.05).sum()
             total_pixels = ndwi_array.size
             water_percentage = (water_pixels / total_pixels) * 100
             
@@ -727,7 +674,7 @@ class WaterAnalyzer:
         # Add metadata
         self.ndwi.attrs['description'] = 'Normalized Difference Water Index'
         self.ndwi.attrs['formula'] = 'NDWI = (Green - NIR) / (Green + NIR)'
-        self.ndwi.attrs['water_threshold'] = 0.3
+        self.ndwi.attrs['water_threshold'] = 0.05
         self.ndwi.attrs['calculation_date'] = datetime.now().isoformat()
         
         # Try to save as NetCDF first, fallback to other formats if needed
@@ -756,7 +703,7 @@ class WaterAnalyzer:
                 save_path = pickle_path
         
         # Print summary
-        water_pixels = (self.ndwi > 0.3).sum()
+        water_pixels = (self.ndwi > 0.05).sum()
         total_pixels = self.ndwi.size
         water_percentage = (water_pixels / total_pixels) * 100
         
@@ -856,7 +803,7 @@ class WaterAnalyzer:
         
         Returns:
         --------
-        Dictionary containing NDWI and MNDWI arrays
+        Dictionary containing NDWI array
         """
         if self.data is None:
             raise ValueError("No data loaded. Run load_data() first.")
@@ -864,13 +811,12 @@ class WaterAnalyzer:
         logger.info("🌊 Calculating water indices with visual progress bars...")
         
         # Create progress bar for overall process
-        with tqdm(total=6, desc="🌊 Water Indices Calculation", unit="step") as pbar:
+        with tqdm(total=4, desc="🌊 Water Indices Calculation", unit="step") as pbar:
             
             # Step 1: Extract bands
             pbar.set_description("📊 Extracting bands")
             green = self.data.sel(band="green")
             nir = self.data.sel(band="nir")
-            swir = self.data.sel(band="swir16")
             pbar.update(1)
             
             # Step 2: Calculate NDWI components
@@ -884,27 +830,13 @@ class WaterAnalyzer:
             self.ndwi = green_minus_nir / green_plus_nir
             pbar.update(1)
             
-            # Step 4: Calculate MNDWI
-            pbar.set_description("🌊 Computing MNDWI")
-            self.mndwi = (green - swir) / (green + swir)
-            pbar.update(1)
-            
-            # Step 5: Compute NDWI
+            # Step 4: Compute NDWI
             pbar.set_description("⚡ Computing NDWI (parallel)")
             if self.enable_parallel and self.dask_client is not None:
                 with progress(self.ndwi) as dask_pbar:
                     self.ndwi = self.ndwi.compute()
             else:
                 self.ndwi = self.ndwi.compute()
-            pbar.update(1)
-            
-            # Step 6: Compute MNDWI
-            pbar.set_description("⚡ Computing MNDWI (parallel)")
-            if self.enable_parallel and self.dask_client is not None:
-                with progress(self.mndwi) as dask_pbar:
-                    self.mndwi = self.mndwi.compute()
-            else:
-                self.mndwi = self.mndwi.compute()
             pbar.update(1)
         
         logger.info("✅ Water indices calculation completed with visual progress!")
@@ -913,10 +845,8 @@ class WaterAnalyzer:
         logger.info("📊 Water indices statistics:")
         logger.info(f"   NDWI range: {float(self.ndwi.min()):.3f} to {float(self.ndwi.max()):.3f}")
         logger.info(f"   NDWI mean: {float(self.ndwi.mean()):.3f}")
-        logger.info(f"   MNDWI range: {float(self.mndwi.min()):.3f} to {float(self.mndwi.max()):.3f}")
-        logger.info(f"   MNDWI mean: {float(self.mndwi.mean()):.3f}")
         
-        result = {"ndwi": self.ndwi, "mndwi": self.mndwi}
+        result = {"ndwi": self.ndwi}
         return result
     
 
@@ -954,7 +884,7 @@ class WaterAnalyzer:
     
     def analyze_water_extent(self, 
                            water_index: str = "ndwi",
-                           threshold: float = 0.3,
+                           threshold: float = 0.05,
                            mask_geometry: Optional[shapely.geometry.Polygon] = None) -> pd.DataFrame:
         """
         Analyze water extent over time.
@@ -962,7 +892,7 @@ class WaterAnalyzer:
         Parameters:
         -----------
         water_index : str
-            Which water index to use ("ndwi" or "mndwi")
+            Which water index to use ("ndwi")
         threshold : float
             Threshold for water classification
         mask_geometry : Optional[shapely.geometry.Polygon]
@@ -974,10 +904,8 @@ class WaterAnalyzer:
         """
         if water_index == "ndwi" and self.ndwi is None:
             raise ValueError("NDWI not calculated. Run calculate_water_indices() first.")
-        elif water_index == "mndwi" and self.mndwi is None:
-            raise ValueError("MNDWI not calculated. Run calculate_water_indices() first.")
         
-        water_data = self.ndwi if water_index == "ndwi" else self.mndwi
+        water_data = self.ndwi
         
         logger.info(f"🌊 Analyzing water extent using {water_index.upper()} with threshold {threshold}")
         logger.info(f"📊 Data shape: {water_data.shape}")
@@ -1138,7 +1066,7 @@ class WaterAnalyzer:
         Parameters:
         -----------
         water_index : str
-            Which water index to plot ("ndwi" or "mndwi")
+            Which water index to plot ("ndwi")
         time_index : int
             Time index to plot
         save_path : Optional[str]
@@ -1146,10 +1074,8 @@ class WaterAnalyzer:
         """
         if water_index == "ndwi" and self.ndwi is None:
             raise ValueError("NDWI not calculated. Run calculate_water_indices() first.")
-        elif water_index == "mndwi" and self.mndwi is None:
-            raise ValueError("MNDWI not calculated. Run calculate_water_indices() first.")
         
-        water_data = self.ndwi if water_index == "ndwi" else self.mndwi
+        water_data = self.ndwi
         
         # Select time slice
         data_slice = water_data.isel(time=time_index)
@@ -1244,13 +1170,10 @@ class WaterAnalyzer:
         logger.info("Creating spatial coverage visualization...")
         self._plot_spatial_coverage(save_dir)
         
-        # 5. Water indices comparison (only if MNDWI is available)
+        # 5. Water indices visualization
         if self.ndwi is not None:
             logger.info("Creating water indices visualization...")
-            if self.mndwi is not None:
-                self._plot_water_indices_comparison(save_dir)
-            else:
-                self._plot_ndwi_only(save_dir)
+            self._plot_ndwi_only(save_dir)
         
         logger.info(f"All visualizations saved to {save_dir}/")
 
@@ -1288,7 +1211,7 @@ class WaterAnalyzer:
         # Plot 3: Band information
         ax3 = axes[1, 0]
         bands = list(self.data.band.values)
-        band_colors = ['green', 'red', 'blue']
+        band_colors = ['green', 'red']
         ax3.bar(bands, [1]*len(bands), color=band_colors[:len(bands)])
         ax3.set_title('Available Bands')
         ax3.set_ylabel('Available')
@@ -1297,8 +1220,7 @@ class WaterAnalyzer:
         # Add band descriptions
         band_descriptions = {
             'green': 'Green (B03)',
-            'nir': 'Near-Infrared (B08)', 
-            'swir16': 'Short-Wave IR (B11)'
+            'nir': 'Near-Infrared (B08)'
         }
         for i, band in enumerate(bands):
             desc = band_descriptions.get(band, band)
@@ -1337,7 +1259,7 @@ class WaterAnalyzer:
         fig.suptitle('Detailed Band Statistics', fontsize=16, fontweight='bold')
         
         bands = list(self.data.band.values)
-        colors = ['green', 'red', 'blue']
+        colors = ['green', 'red']
         
         for i, band in enumerate(bands):
             band_data = self.data.sel(band=band)
@@ -1367,11 +1289,11 @@ class WaterAnalyzer:
 
     def _plot_time_series_overview(self, save_dir: str) -> None:
         """Create time series overview visualization."""
-        fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+        fig, axes = plt.subplots(2, 1, figsize=(15, 12))
         fig.suptitle('Time Series Overview', fontsize=16, fontweight='bold')
         
         bands = list(self.data.band.values)
-        colors = ['green', 'red', 'blue']
+        colors = ['green', 'red']
         
         for i, band in enumerate(bands):
             band_data = self.data.sel(band=band)
@@ -1410,7 +1332,7 @@ class WaterAnalyzer:
         
         # Create RGB composite (normalize each band)
         rgb_data = np.zeros((first_slice.sizes['y'], first_slice.sizes['x'], 3))
-        for i, band in enumerate(['green', 'nir', 'swir16']):
+        for i, band in enumerate(['green', 'nir']):
             if band in first_slice.band.values:
                 band_data = first_slice.sel(band=band).values
                 # Normalize to 0-1
@@ -1464,49 +1386,7 @@ class WaterAnalyzer:
         plt.close()
         logger.info("Spatial coverage saved")
 
-    def _plot_water_indices_comparison(self, save_dir: str) -> None:
-        """Create water indices comparison visualization."""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Water Indices Comparison', fontsize=16, fontweight='bold')
-        
-        # Plot 1: NDWI histogram
-        ax1 = axes[0, 0]
-        ndwi_values = self.ndwi.values.flatten()
-        ax1.hist(ndwi_values, bins=50, alpha=0.7, color='blue', edgecolor='black')
-        ax1.axvline(x=0.3, color='red', linestyle='--', linewidth=2, label='Water Threshold (0.3)')
-        ax1.set_title('NDWI Distribution')
-        ax1.set_xlabel('NDWI Value')
-        ax1.set_ylabel('Frequency')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: MNDWI histogram
-        ax2 = axes[0, 1]
-        mndwi_values = self.mndwi.values.flatten()
-        ax2.hist(mndwi_values, bins=50, alpha=0.7, color='green', edgecolor='black')
-        ax2.axvline(x=0.3, color='red', linestyle='--', linewidth=2, label='Water Threshold (0.3)')
-        ax2.set_title('MNDWI Distribution')
-        ax2.set_xlabel('MNDWI Value')
-        ax2.set_ylabel('Frequency')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        # Plot 3: NDWI map (first time step)
-        ax3 = axes[1, 0]
-        ndwi_slice = self.ndwi.isel(time=0)
-        im3 = ndwi_slice.plot(ax=ax3, cmap='BrBG', vmin=-1, vmax=1, add_colorbar=True)
-        ax3.set_title(f'NDWI - {pd.to_datetime(ndwi_slice.time.values).strftime("%Y-%m-%d")}')
-        
-        # Plot 4: MNDWI map (first time step)
-        ax4 = axes[1, 1]
-        mndwi_slice = self.mndwi.isel(time=0)
-        im4 = mndwi_slice.plot(ax=ax4, cmap='BrBG', vmin=-1, vmax=1, add_colorbar=True)
-        ax4.set_title(f'MNDWI - {pd.to_datetime(mndwi_slice.time.values).strftime("%Y-%m-%d")}')
-        
-        plt.tight_layout()
-        plt.savefig(f'{save_dir}/05_water_indices_comparison.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        logger.info("Water indices comparison saved")
+
 
     def _plot_ndwi_only(self, save_dir: str) -> None:
         """Create NDWI-only visualization."""
@@ -1518,7 +1398,7 @@ class WaterAnalyzer:
         if self.ndwi is not None:
             ndwi_values = self.ndwi.values.flatten()
             ax1.hist(ndwi_values, bins=50, alpha=0.7, color='blue', edgecolor='black')
-            ax1.axvline(x=0.3, color='red', linestyle='--', linewidth=2, label='Water Threshold (0.3)')
+            ax1.axvline(x=0.05, color='red', linestyle='--', linewidth=2, label='Water Threshold (0.05)')
             ax1.set_title('NDWI Distribution')
             ax1.set_xlabel('NDWI Value')
             ax1.set_ylabel('Frequency')
@@ -1567,7 +1447,7 @@ class WaterAnalyzer:
             for t in self.ndwi.time.values:
                 try:
                     ndwi_t = self.ndwi.sel(time=t).compute()
-                    water_mask = ndwi_t > 0.3
+                    water_mask = ndwi_t > 0.05
                     count = water_mask.sum().item()
                     water_pixels.append(count)
                     dates.append(pd.to_datetime(t))
@@ -1575,7 +1455,7 @@ class WaterAnalyzer:
                     continue
             
             ax4.plot(dates, water_pixels, 'o-', color='green', linewidth=2, markersize=4)
-            ax4.set_title('Water Pixels Over Time (NDWI > 0.3)')
+            ax4.set_title('Water Pixels Over Time (NDWI > 0.05)')
             ax4.set_xlabel('Date')
             ax4.set_ylabel('Water Pixels')
             ax4.grid(True, alpha=0.3)
@@ -1631,7 +1511,7 @@ class WaterAnalyzer:
                 ndwi_array = ndwi_array[0] if ndwi_array.shape[0] == 1 else ndwi_array.squeeze()
             
             # Count water pixels
-            water_mask = ndwi_array > 0.3
+            water_mask = ndwi_array > 0.05
             water_pixels = water_mask.sum()
             total_pixels = ndwi_array.size
             water_percentage = (water_pixels / total_pixels) * 100
@@ -1770,19 +1650,12 @@ def main():
     logger.info("🚀 Starting Water Analysis Framework")
     logger.info("=" * 50)
     
-    # Test API connection before proceeding
-    try:
-        test_api_connection(max_retries=3, retry_delay=2)
-    except Exception as e:
-        logger.error(str(e))
-        return None, None
-    
-    # Configuration for short-term analysis (2023 only)
+    # Configuration for single year analysis (2023)
     bbox = [-73.705, 4.605, -73.700, 4.610]  # Very small area for testing
-    start_date = "2023-01-01"
-    end_date = "2023-12-31"
+    start_date = "2023-01-01"  # Analyzing only 2023
+    end_date = "2023-12-31"  # End date for single year analysis
     
-    logger.info("📅 Long-term analysis: 10-year time series (2014-2024)")
+    logger.info("📅 Single year analysis: 2023")
     logger.info("📊 This will provide comprehensive water dynamics analysis")
     
     logger.info("⚙️  Configuration:")
@@ -1797,12 +1670,13 @@ def main():
     logger.info("🔧 Initializing WaterAnalyzer with optimized settings...")
     analyzer = WaterAnalyzer(
         collection="sentinel-2-l2a",
-        assets=["B03", "B08", "B11"],  # Green, NIR, SWIR (for both NDWI and MNDWI)
-        chunksize=4096,  # Larger chunks like notebook
-        resolution=100,
+        assets=["B03", "B08", "SCL"],  # Green, NIR, and Scene Classification for cloud masking
+        band_aliases={"green": "B03", "nir": "B08", "scl": "SCL"},  # Band name mappings
+        chunksize=256,  # Much smaller chunks to match tile size
+        resolution=500,  # Much lower resolution to reduce data size significantly
         epsg=32618,  # UTM Zone 18N for Colombia region
-        enable_parallel=True,  # Enable parallel processing
-        n_workers=6  # Use 6 workers for optimal performance
+        enable_parallel=False,  # Disable parallel processing for testing
+        n_workers=2  # Reduced workers to avoid too many concurrent connections
     )
     
     try:
@@ -1814,8 +1688,8 @@ def main():
             bbox=bbox,
             start_date=start_date,
             end_date=end_date,
-            max_cloud_cover=20.0,  # More flexible cloud cover for longer time series
-            max_items=200  # Higher limit for 10-year analysis
+            max_cloud_cover=20.0,  # Allow up to 20% cloud cover
+            max_items=5  # Minimal number of images for testing
         )
         
         # Step 2: Load data
@@ -1910,13 +1784,14 @@ if __name__ == "__main__":
         analyzer, results = main()
         
         print("\n" + "=" * 60)
-        print("🎉 QUICK WATER INDICES ANALYSIS COMPLETED!")
+        print("🎉 NDWI ANALYSIS COMPLETED!")
         print("=" * 60)
         print("📁 Generated files:")
-        print("   📁 images/quick_ndwi_map.png - NDWI map for first image")
-        print("   📁 images/quick_mndwi_map.png - MNDWI map for first image")
+        print("   📁 ndwi_images/ - NDWI maps for all images")
+        print("   📄 ndwi_data.nc - NDWI data")
+        print("   📊 water_pixels_by_year.png - Yearly analysis")
         print("   📄 water_analysis.log - Detailed execution log")
-        print("\n💡 NDWI and MNDWI values for each image are shown above!")
+        print("\n💡 NDWI values and water pixel counts shown above!")
         
     except Exception as e:
         print(f"\n❌ Analysis failed: {e}")
