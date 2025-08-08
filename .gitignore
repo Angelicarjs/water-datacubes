@@ -83,16 +83,8 @@ dmypy.json
 *.tiff
 *.jpg
 *.jpeg
-*.png
 *.gif
 *.bmp
-
-# Analysis outputs
-ndwi_images/
-images/
-water_pixels_by_year.png
-cloud_water_correlation.png
-cloud_masking_analysis.png
 
 # Log files
 *.log
@@ -135,7 +127,6 @@ secrets.json
 docker-compose.override.yml
 
 # Generated outputs (keep structure but ignore content)
-outputs/*
 !outputs/.gitkeep
 data/*
 !data/.gitkeep
