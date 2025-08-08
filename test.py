@@ -180,7 +180,7 @@ class WaterAnalyzer:
                    bbox: List[float],
                    start_date: str = "2014-01-01",
                    end_date: str = "2024-12-31",
-                   max_cloud_cover: float = 20.0,
+                   max_cloud_cover: float = 10.0,
                    max_items: int = 200) -> List:
         """
         Search for satellite data in the specified area and time period.
@@ -711,6 +711,269 @@ class WaterAnalyzer:
         logger.info(f"   Total time steps: {len(self.ndwi.time)}")
         logger.info(f"   Total pixels per image: {total_pixels:,}")
         logger.info(f"   Total water pixels: {water_pixels:,} ({water_percentage:.2f}%)")
+    
+    def extract_cloud_water_data(self):
+        """
+        Extract cloud cover and water pixels data for correlation analysis.
+        
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame with cloud cover and water pixels data
+        """
+        if self.data is None or self.ndwi is None:
+            raise ValueError("Both satellite data and NDWI must be loaded. Run load_data() and calculate_ndwi_only() first.")
+        
+        logger.info("📊 Extracting cloud cover and water pixels data...")
+        
+        analysis_data = []
+        
+        for time_val in self.ndwi.time.values:
+            date = pd.to_datetime(time_val)
+            
+            # Get NDWI data for this time step
+            ndwi_slice = self.ndwi.sel(time=time_val)
+            
+            # Ensure the slice is 2D for analysis
+            if len(ndwi_slice.dims) > 2:
+                extra_dims = [dim for dim in ndwi_slice.dims if dim not in ['y', 'x', 'lat', 'lon']]
+                for dim in extra_dims:
+                    ndwi_slice = ndwi_slice.isel({dim: 0})
+            
+            # Convert to numpy array and ensure it's 2D
+            ndwi_array = ndwi_slice.values
+            if ndwi_array.ndim > 2:
+                ndwi_array = ndwi_array[0] if ndwi_array.shape[0] == 1 else ndwi_array.squeeze()
+            
+            # Count water pixels using current threshold
+            water_mask = ndwi_array > 0.05  # Using current threshold
+            water_pixels = water_mask.sum()
+            total_pixels = ndwi_array.size
+            water_percentage = (water_pixels / total_pixels) * 100
+            
+            # Get cloud cover from SCL band
+            cloud_cover = None
+            try:
+                # Get SCL data for this time step
+                scl_slice = self.data.sel(band="SCL", time=time_val)
+                scl_array = scl_slice.values
+                if scl_array.ndim > 2:
+                    scl_array = scl_array.squeeze()
+                
+                # Calculate cloud cover from SCL (classes 1, 2, 3, 8, 9, 10 are clouds/shadows)
+                cloud_classes = [1, 2, 3, 8, 9, 10]
+                cloud_pixels = np.isin(scl_array, cloud_classes).sum()
+                cloud_cover = (cloud_pixels / total_pixels) * 100
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Could not extract cloud cover for {date}: {e}")
+                cloud_cover = 0
+            
+            # Store data
+            analysis_data.append({
+                'date': date,
+                'year': date.year,
+                'month': date.month,
+                'water_pixels': water_pixels,
+                'water_percentage': water_percentage,
+                'cloud_cover': cloud_cover,
+                'total_pixels': total_pixels
+            })
+        
+        df = pd.DataFrame(analysis_data)
+        logger.info(f"✅ Extracted data for {len(df)} time steps")
+        
+        return df
+    
+    def calculate_correlation_statistics(self, df):
+        """
+        Calculate correlation statistics between cloud cover and water pixels.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            DataFrame with cloud cover and water pixels data
+            
+        Returns:
+        --------
+        dict
+            Dictionary with correlation statistics
+        """
+        from scipy import stats
+        from sklearn.linear_model import LinearRegression
+        from sklearn.metrics import r2_score
+        
+        # Pearson correlation
+        pearson_r, pearson_p = stats.pearsonr(df['cloud_cover'], df['water_pixels'])
+        
+        # Spearman correlation
+        spearman_r, spearman_p = stats.spearmanr(df['cloud_cover'], df['water_pixels'])
+        
+        # Linear regression
+        X = df['cloud_cover'].values.reshape(-1, 1)
+        y = df['water_pixels'].values
+        reg = LinearRegression().fit(X, y)
+        r_squared = r2_score(y, reg.predict(X))
+        
+        # Calculate confidence intervals
+        slope = reg.coef_[0]
+        intercept = reg.intercept_
+        
+        return {
+            'pearson_r': pearson_r,
+            'pearson_p': pearson_p,
+            'spearman_r': spearman_r,
+            'spearman_p': spearman_p,
+            'r_squared': r_squared,
+            'slope': slope,
+            'intercept': intercept,
+            'n_observations': len(df)
+        }
+    
+    def analyze_cloud_water_correlation(self, save_path: str = "cloud_water_correlation.png"):
+        """
+        Analyze correlation between cloud cover and water pixels.
+        
+        Parameters:
+        -----------
+        save_path : str
+            Path to save the analysis plots
+        """
+        logger.info("📊 Analyzing cloud-water correlation...")
+        
+        # Extract data
+        df = self.extract_cloud_water_data()
+        
+        # Create figure with multiple subplots
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle('Cloud Cover vs Water Pixels Correlation Analysis', fontsize=16, fontweight='bold')
+        
+        # Filter out invalid data
+        valid_data = df[(df['cloud_cover'] >= 0) & (df['water_pixels'] >= 0)].copy()
+        
+        if len(valid_data) == 0:
+            logger.error("❌ No valid data for correlation analysis")
+            return
+        
+        # Plot 1: Scatter plot - Cloud cover vs Water pixels
+        ax1 = axes[0, 0]
+        ax1.scatter(valid_data['cloud_cover'], valid_data['water_pixels'], 
+                   alpha=0.6, color='blue', s=50)
+        
+        # Add trend line
+        if len(valid_data) > 1:
+            z = np.polyfit(valid_data['cloud_cover'], valid_data['water_pixels'], 1)
+            p = np.poly1d(z)
+            ax1.plot(valid_data['cloud_cover'], p(valid_data['cloud_cover']), 
+                    "r--", alpha=0.8, linewidth=2)
+        
+        ax1.set_xlabel('Cloud Cover (%)')
+        ax1.set_ylabel('Water Pixels')
+        ax1.set_title('Cloud Cover vs Water Pixels')
+        ax1.grid(True, alpha=0.3)
+        
+        # Plot 2: Scatter plot - Cloud cover vs Water percentage
+        ax2 = axes[0, 1]
+        ax2.scatter(valid_data['cloud_cover'], valid_data['water_percentage'], 
+                   alpha=0.6, color='green', s=50)
+        
+        # Add trend line
+        if len(valid_data) > 1:
+            z = np.polyfit(valid_data['cloud_cover'], valid_data['water_percentage'], 1)
+            p = np.poly1d(z)
+            ax2.plot(valid_data['cloud_cover'], p(valid_data['cloud_cover']), 
+                    "r--", alpha=0.8, linewidth=2)
+        
+        ax2.set_xlabel('Cloud Cover (%)')
+        ax2.set_ylabel('Water Percentage (%)')
+        ax2.set_title('Cloud Cover vs Water Percentage')
+        ax2.grid(True, alpha=0.3)
+        
+        # Plot 3: Correlation heatmap
+        ax3 = axes[0, 2]
+        correlation_matrix = valid_data[['cloud_cover', 'water_pixels', 'water_percentage']].corr()
+        import seaborn as sns
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, 
+                    square=True, ax=ax3, cbar_kws={'label': 'Correlation Coefficient'})
+        ax3.set_title('Correlation Matrix')
+        
+        # Plot 4: Cloud cover distribution
+        ax4 = axes[1, 0]
+        ax4.hist(valid_data['cloud_cover'], bins=20, alpha=0.7, color='lightblue', 
+                 edgecolor='black', density=True)
+        ax4.set_xlabel('Cloud Cover (%)')
+        ax4.set_ylabel('Density')
+        ax4.set_title('Cloud Cover Distribution')
+        ax4.grid(True, alpha=0.3)
+        
+        # Plot 5: Water pixels by cloud cover categories
+        ax5 = axes[1, 1]
+        # Create cloud cover categories
+        valid_data['cloud_category'] = pd.cut(valid_data['cloud_cover'], 
+                                             bins=[0, 10, 25, 50, 100], 
+                                             labels=['Clear (0-10%)', 'Low (10-25%)', 'Medium (25-50%)', 'High (50-100%)'])
+        
+        cloud_water_stats = valid_data.groupby('cloud_category')['water_pixels'].agg(['mean', 'std', 'count']).dropna()
+        
+        if len(cloud_water_stats) > 0:
+            x_pos = range(len(cloud_water_stats))
+            ax5.bar(x_pos, cloud_water_stats['mean'], yerr=cloud_water_stats['std'], 
+                   capsize=5, alpha=0.7, color='skyblue')
+            ax5.set_xlabel('Cloud Cover Category')
+            ax5.set_ylabel('Average Water Pixels')
+            ax5.set_title('Water Pixels by Cloud Cover Category')
+            ax5.set_xticks(x_pos)
+            ax5.set_xticklabels(cloud_water_stats.index, rotation=45)
+            ax5.grid(True, alpha=0.3)
+        
+        # Plot 6: Time series of cloud cover and water pixels
+        ax6 = axes[1, 2]
+        ax6_twin = ax6.twinx()
+        
+        # Sort by date
+        valid_data_sorted = valid_data.sort_values('date')
+        
+        # Plot cloud cover on primary y-axis
+        line1 = ax6.plot(valid_data_sorted['date'], valid_data_sorted['cloud_cover'], 
+                         'o-', color='gray', linewidth=2, markersize=4, label='Cloud Cover')
+        ax6.set_xlabel('Date')
+        ax6.set_ylabel('Cloud Cover (%)', color='gray')
+        ax6.tick_params(axis='y', labelcolor='gray')
+        ax6.grid(True, alpha=0.3)
+        
+        # Plot water pixels on secondary y-axis
+        line2 = ax6_twin.plot(valid_data_sorted['date'], valid_data_sorted['water_pixels'], 
+                              's-', color='blue', linewidth=2, markersize=4, label='Water Pixels')
+        ax6_twin.set_ylabel('Water Pixels', color='blue')
+        ax6_twin.tick_params(axis='y', labelcolor='blue')
+        
+        # Add legend
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+        ax6.legend(lines, labels, loc='upper left')
+        
+        ax6.set_title('Cloud Cover and Water Pixels Over Time')
+        ax6.tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Calculate correlation statistics
+        correlation_stats = self.calculate_correlation_statistics(valid_data)
+        
+        # Print summary
+        logger.info("📊 Cloud-Water Correlation Analysis Summary:")
+        logger.info(f"   Total observations: {len(valid_data)}")
+        logger.info(f"   Cloud cover range: {valid_data['cloud_cover'].min():.1f}% - {valid_data['cloud_cover'].max():.1f}%")
+        logger.info(f"   Water pixels range: {valid_data['water_pixels'].min():.0f} - {valid_data['water_pixels'].max():.0f}")
+        logger.info(f"   Correlation coefficient (cloud vs water pixels): {correlation_stats['pearson_r']:.3f}")
+        logger.info(f"   P-value: {correlation_stats['pearson_p']:.3f}")
+        logger.info(f"   R-squared: {correlation_stats['r_squared']:.3f}")
+        
+        logger.info(f"✅ Cloud-water correlation analysis saved to {save_path}")
+        
+        return correlation_stats
     
     def print_computation_progress(self):
         """
@@ -1650,12 +1913,12 @@ def main():
     logger.info("🚀 Starting Water Analysis Framework")
     logger.info("=" * 50)
     
-    # Configuration for single year analysis (2023)
+    # Configuration for 10-year analysis (2014-2024)
     bbox = [-73.705, 4.605, -73.700, 4.610]  # Very small area for testing
-    start_date = "2023-01-01"  # Analyzing only 2023
-    end_date = "2023-12-31"  # End date for single year analysis
+    start_date = "2014-01-01"  # Start of 10-year analysis window
+    end_date = "2024-12-31"  # End of 10-year analysis window
     
-    logger.info("📅 Single year analysis: 2023")
+    logger.info("📅 10-year analysis: 2014-2024")
     logger.info("📊 This will provide comprehensive water dynamics analysis")
     
     logger.info("⚙️  Configuration:")
@@ -1688,7 +1951,7 @@ def main():
             bbox=bbox,
             start_date=start_date,
             end_date=end_date,
-            max_cloud_cover=20.0,  # Allow up to 20% cloud cover
+            max_cloud_cover=10.0,  # Allow up to 20% cloud cover
             max_items=5  # Minimal number of images for testing
         )
         
@@ -1742,7 +2005,11 @@ def main():
         logger.info("="*50)
         analyzer.plot_water_pixels_by_year(save_path="water_pixels_by_year.png")
         
-
+        # Step 8: Cloud-water correlation analysis
+        logger.info("\n" + "="*50)
+        logger.info("☁️ STEP 8: CLOUD-WATER CORRELATION ANALYSIS")
+        logger.info("="*50)
+        correlation_stats = analyzer.analyze_cloud_water_correlation(save_path="cloud_water_correlation.png")
         
         # Summary
         logger.info("\n" + "="*50)
@@ -1756,6 +2023,7 @@ def main():
         logger.info("   📁 ndwi_images/ (all NDWI images)")
         logger.info("   📄 ndwi_data.nc (NDWI data)")
         logger.info("   📊 water_pixels_by_year.png (yearly analysis)")
+        logger.info("   📊 cloud_water_correlation.png (correlation analysis)")
         logger.info("   📄 water_analysis.log")
         logger.info("📊 Water pixel counts shown for each image")
         
